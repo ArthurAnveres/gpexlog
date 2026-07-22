@@ -14,7 +14,7 @@ export function Logo({
   const content = (
     <>
       <img
-        src="/gpex-logo.jpg"
+        src={`${import.meta.env.BASE_URL}gpex-logo.jpg`}
         alt=""
         className="logo-img"
         width={40}

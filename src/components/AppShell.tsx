@@ -110,7 +110,7 @@ export function AppShell() {
         <div className="app-top">
           <div className="company-chip">
             <img
-              src="/gpex-logo.jpg"
+              src={`${import.meta.env.BASE_URL}gpex-logo.jpg`}
               alt=""
               className="logo-img logo-img-sm"
               width={28}

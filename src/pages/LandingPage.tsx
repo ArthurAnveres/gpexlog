@@ -65,7 +65,7 @@ export function LandingPage() {
           <div className="hero-content">
             <div className="hero-brand">
               <img
-                src="/gpex-logo.jpg"
+                src={`${import.meta.env.BASE_URL}gpex-logo.jpg`}
                 alt="GpexLog"
                 className="hero-logo"
                 width={96}
