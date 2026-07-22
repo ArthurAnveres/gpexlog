@@ -1,23 +1,39 @@
 import {
   createContext,
+  useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from 'react'
 import {
-  DEPOT_COORDS,
-  INITIAL_EMPLOYEES,
   INITIAL_PRODUCTS,
-  INITIAL_PROOFS,
-  INITIAL_SHIPMENTS,
   type Employee,
   type Product,
   type PlanId,
   type Proof,
   type Shipment,
-  type ShipmentPhoto,
 } from '../data/mock'
+import {
+  adminLogin,
+  adminLogout,
+  blockDriver,
+  cancelDelivery,
+  createDelivery,
+  createDriver,
+  fetchDeliveries,
+  fetchDrivers,
+  getStoredUser,
+  getToken,
+  unblockDriver,
+  type AdminUser,
+} from '../lib/api'
+import {
+  mapDeliveryToShipment,
+  mapDriverToEmployee,
+  proofsFromApiShipments,
+} from '../lib/mappers'
 
 export interface CompanyAccount {
   companyName: string
@@ -29,34 +45,52 @@ export interface CompanyAccount {
 
 interface AppState {
   isAuthenticated: boolean
+  loading: boolean
+  apiError: string | null
   company: CompanyAccount | null
+  user: AdminUser | null
   employees: Employee[]
   products: Product[]
   shipments: Shipment[]
   proofs: Proof[]
-  login: (email: string) => void
-  logout: () => void
+  refreshData: () => Promise<void>
+  login: (email: string, password: string) => Promise<void>
+  logout: () => Promise<void>
   registerCompany: (data: CompanyAccount) => void
   setPlan: (plan: PlanId) => void
-  addEmployee: (employee: Omit<Employee, 'id'>) => void
-  updateEmployeeStatus: (id: string, status: Employee['status']) => void
+  addEmployee: (employee: {
+    name: string
+    email: string
+    phone: string
+    password: string
+    vehicle?: string
+  }) => Promise<void>
+  updateEmployeeStatus: (
+    id: string,
+    status: Employee['status'],
+  ) => Promise<void>
   addProduct: (product: Omit<Product, 'id'>) => void
-  addShipment: (shipment: Omit<Shipment, 'id'>) => void
+  addShipment: (input: {
+    productName: string
+    recipient: string
+    address: string
+    zip: string
+    lat: number
+    lng: number
+    driverId?: string
+    customerPhone?: string
+    apartmentSuite?: string
+    instructions?: string
+  }) => Promise<void>
   updateShipment: (id: string, patch: Partial<Shipment>) => void
-  /** Simulate warehouse QR/barcode scan + pickup photo */
+  cancelShipment: (id: string) => Promise<void>
   simulatePickup: (id: string) => void
-  /** Simulate drop-off photo that completes the delivery */
   simulateDelivery: (id: string) => void
 }
 
 const AppContext = createContext<AppState | null>(null)
 
 const STORAGE_KEY = 'gpexlog_prototype_v1'
-
-const PICKUP_PHOTO =
-  'https://images.unsplash.com/photo-1566576721346-d4a3b4eaeb55?w=800&q=80'
-const DELIVERY_PHOTO =
-  'https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?w=800&q=80'
 
 function loadCompany(): CompanyAccount | null {
   try {
@@ -68,67 +102,80 @@ function loadCompany(): CompanyAccount | null {
   }
 }
 
-function proofsFromShipments(shipments: Shipment[]): Proof[] {
-  return shipments.flatMap((s) => {
-    const items: Proof[] = []
-    if (s.pickupPhoto) {
-      items.push({
-        id: `pu-${s.id}`,
-        orderCode: s.code,
-        recipient: s.recipient,
-        courier: s.assignedTo ?? '—',
-        photoUrl: s.pickupPhoto.url,
-        lat: s.pickupPhoto.lat,
-        lng: s.pickupPhoto.lng,
-        deliveredAt: s.pickupPhoto.takenAt,
-        address: 'Warehouse depot',
-        kind: 'pickup',
-      })
-    }
-    if (s.deliveryPhoto) {
-      items.push({
-        id: `de-${s.id}`,
-        orderCode: s.code,
-        recipient: s.recipient,
-        courier: s.assignedTo ?? '—',
-        photoUrl: s.deliveryPhoto.url,
-        lat: s.deliveryPhoto.lat,
-        lng: s.deliveryPhoto.lng,
-        deliveredAt: s.deliveryPhoto.takenAt,
-        address: s.address,
-        kind: 'delivery',
-      })
-    }
-    return items
-  })
-}
-
 export function AppProvider({ children }: { children: ReactNode }) {
   const [company, setCompany] = useState<CompanyAccount | null>(() => loadCompany())
-  const [isAuthenticated, setIsAuthenticated] = useState(() => Boolean(loadCompany()))
-  const [employees, setEmployees] = useState<Employee[]>(INITIAL_EMPLOYEES)
+  const [user, setUser] = useState<AdminUser | null>(() => getStoredUser())
+  const [isAuthenticated, setIsAuthenticated] = useState(() => Boolean(getToken()))
+  const [loading, setLoading] = useState(false)
+  const [apiError, setApiError] = useState<string | null>(null)
+  const [employees, setEmployees] = useState<Employee[]>([])
   const [products, setProducts] = useState<Product[]>(INITIAL_PRODUCTS)
-  const [shipments, setShipments] = useState<Shipment[]>(INITIAL_SHIPMENTS)
-  const [proofs, setProofs] = useState<Proof[]>(INITIAL_PROOFS)
+  const [shipments, setShipments] = useState<Shipment[]>([])
+  const [proofs, setProofs] = useState<Proof[]>([])
+
+  const refreshData = useCallback(async () => {
+    if (!getToken()) return
+    setLoading(true)
+    setApiError(null)
+    try {
+      const [driversRes, deliveriesRes] = await Promise.all([
+        fetchDrivers(true),
+        fetchDeliveries(),
+      ])
+
+      const mappedEmployees = driversRes.data.map(mapDriverToEmployee)
+      const mappedShipments = deliveriesRes.data.map(mapDeliveryToShipment)
+
+      setEmployees(mappedEmployees)
+      setShipments(mappedShipments)
+      setProofs(proofsFromApiShipments(mappedShipments))
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to load API data'
+      setApiError(message)
+      if (message.includes('(401)')) {
+        setIsAuthenticated(false)
+        setUser(null)
+      }
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      void refreshData()
+    }
+  }, [isAuthenticated, refreshData])
 
   const value = useMemo<AppState>(
     () => ({
       isAuthenticated,
+      loading,
+      apiError,
       company,
+      user,
       employees,
       products,
       shipments,
       proofs,
-      login: (email: string) => {
+      refreshData,
+      login: async (email, password) => {
+        const result = await adminLogin(email, password)
+        setUser(result.user)
         const stored = loadCompany()
         if (stored) {
-          setCompany(stored)
+          setCompany({
+            ...stored,
+            adminName: result.user.name,
+            adminEmail: result.user.email,
+          })
         } else {
           const demo: CompanyAccount = {
-            companyName: 'Horizon Delivery Co.',
-            taxId: '12-3456789',
-            adminName: 'Ana Souza',
-            adminEmail: email || 'ana@horizondelivery.com',
+            companyName: 'GpexLog Logistics',
+            taxId: '00-0000000',
+            adminName: result.user.name,
+            adminEmail: result.user.email,
             plan: 'pro',
           }
           localStorage.setItem(STORAGE_KEY, JSON.stringify(demo))
@@ -136,21 +183,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         setIsAuthenticated(true)
       },
-      logout: () => setIsAuthenticated(false),
+      logout: async () => {
+        await adminLogout()
+        setIsAuthenticated(false)
+        setUser(null)
+        setEmployees([])
+        setShipments([])
+        setProofs([])
+      },
       registerCompany: (data) => {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
         setCompany(data)
-        setEmployees((prev) => [
-          {
-            id: `e-${Date.now()}`,
-            name: data.adminName,
-            email: data.adminEmail,
-            role: 'admin',
-            status: 'active',
-          },
-          ...prev.filter((e) => e.role !== 'admin'),
-        ])
-        setIsAuthenticated(true)
       },
       setPlan: (plan) => {
         setCompany((prev) => {
@@ -160,90 +203,77 @@ export function AppProvider({ children }: { children: ReactNode }) {
           return next
         })
       },
-      addEmployee: (employee) => {
-        setEmployees((prev) => [
-          { ...employee, id: `e-${Date.now()}` },
-          ...prev,
-        ])
+      addEmployee: async (employee) => {
+        await createDriver({
+          name: employee.name,
+          email: employee.email,
+          phone: employee.phone,
+          password: employee.password,
+          vehicle: employee.vehicle,
+        })
+        await refreshData()
       },
-      updateEmployeeStatus: (id, status) => {
-        setEmployees((prev) =>
-          prev.map((e) => (e.id === id ? { ...e, status } : e)),
-        )
+      updateEmployeeStatus: async (id, status) => {
+        if (status === 'inactive') {
+          await blockDriver(id)
+        } else {
+          await unblockDriver(id)
+        }
+        await refreshData()
       },
       addProduct: (product) => {
         setProducts((prev) => [{ ...product, id: `pr-${Date.now()}` }, ...prev])
       },
-      addShipment: (shipment) => {
-        setShipments((prev) => {
-          const next = [{ ...shipment, id: `o-${Date.now()}` }, ...prev]
-          setProofs(proofsFromShipments(next))
-          return next
+      addShipment: async (input) => {
+        await createDelivery({
+          driver_id: input.driverId ? Number(input.driverId) : null,
+          customer_name: input.recipient,
+          customer_phone: input.customerPhone,
+          destination_address: input.address,
+          apartment_suite: input.apartmentSuite,
+          zip_code: input.zip,
+          latitude: input.lat,
+          longitude: input.lng,
+          order_number: `ORD-${Date.now()}`,
+          instructions: [
+            `Product: ${input.productName}`,
+            input.instructions,
+          ]
+            .filter(Boolean)
+            .join('\n'),
         })
+        await refreshData()
       },
       updateShipment: (id, patch) => {
         setShipments((prev) => {
           const next = prev.map((s) => (s.id === id ? { ...s, ...patch } : s))
-          setProofs(proofsFromShipments(next))
+          setProofs(proofsFromApiShipments(next))
           return next
         })
       },
-      simulatePickup: (id) => {
-        const now = new Date().toISOString()
-        const photo: ShipmentPhoto = {
-          kind: 'pickup',
-          url: PICKUP_PHOTO,
-          takenAt: now,
-          lat: DEPOT_COORDS.lat,
-          lng: DEPOT_COORDS.lng,
-        }
-        setShipments((prev) => {
-          const next = prev.map((s) =>
-            s.id === id
-              ? {
-                  ...s,
-                  status: 'in_transit' as const,
-                  scannedAt: now,
-                  pickedUpAt: now,
-                  pickupPhoto: photo,
-                }
-              : s,
-          )
-          setProofs(proofsFromShipments(next))
-          return next
-        })
+      cancelShipment: async (id) => {
+        await cancelDelivery(id)
+        await refreshData()
       },
-      simulateDelivery: (id) => {
-        const now = new Date().toISOString()
-        setShipments((prev) => {
-          const next = prev.map((s) => {
-            if (s.id !== id) return s
-            const picked = s.pickedUpAt ? new Date(s.pickedUpAt).getTime() : Date.now()
-            const duration = Math.max(
-              1,
-              Math.round((Date.now() - picked) / 60_000),
-            )
-            const photo: ShipmentPhoto = {
-              kind: 'delivery',
-              url: DELIVERY_PHOTO,
-              takenAt: now,
-              lat: s.lat ?? DEPOT_COORDS.lat,
-              lng: s.lng ?? DEPOT_COORDS.lng,
-            }
-            return {
-              ...s,
-              status: 'delivered' as const,
-              deliveredAt: now,
-              deliveryPhoto: photo,
-              actualDurationMinutes: duration,
-            }
-          })
-          setProofs(proofsFromShipments(next))
-          return next
-        })
+      simulatePickup: () => {
+        // Real pickup happens on the mobile driver app.
+      },
+      simulateDelivery: () => {
+        // Real POD happens on the mobile driver app.
       },
     }),
-    [isAuthenticated, company, employees, products, shipments, proofs],
+    [
+      isAuthenticated,
+      loading,
+      apiError,
+      company,
+      user,
+      employees,
+      products,
+      shipments,
+      proofs,
+      refreshData,
+    ],
   )
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>

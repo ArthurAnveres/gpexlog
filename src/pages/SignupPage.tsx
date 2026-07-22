@@ -51,7 +51,7 @@ export function SignupPage() {
       adminEmail,
       plan,
     })
-    navigate('/app')
+    navigate('/login')
   }
 
   return (

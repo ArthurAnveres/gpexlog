@@ -9,6 +9,7 @@ import {
   type DeliveryStatus,
   type Shipment,
 } from '../data/mock'
+import { ApiError } from '../lib/api'
 import {
   estimateRouteWithGoogle,
   hasGoogleMapsKey,
@@ -21,22 +22,27 @@ export function ShipmentsPage() {
     products,
     employees,
     addShipment,
-    simulatePickup,
-    simulateDelivery,
+    cancelShipment,
+    loading,
+    apiError,
+    refreshData,
   } = useApp()
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState<Shipment | null>(null)
   const [productId, setProductId] = useState('')
   const [recipient, setRecipient] = useState('')
-  const [assignedTo, setAssignedTo] = useState('')
+  const [driverId, setDriverId] = useState('')
   const [address, setAddress] = useState('')
+  const [zip, setZip] = useState('')
   const [resolved, setResolved] = useState<AddressSuggestion | null>(null)
   const [etaPreview, setEtaPreview] = useState<Awaited<
     ReturnType<typeof estimateRouteWithGoogle>
   > | null>(null)
   const [estimating, setEstimating] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
 
-  const drivers = employees.filter((e) => e.role === 'driver')
+  const drivers = employees.filter((e) => e.role === 'driver' && e.status === 'active')
   const productMap = useMemo(
     () => Object.fromEntries(products.map((p) => [p.id, p])),
     [products],
@@ -49,6 +55,7 @@ export function ShipmentsPage() {
 
   async function handleAddressSelect(suggestion: AddressSuggestion) {
     setResolved(suggestion)
+    setZip(suggestion.zip || '')
     if (!suggestion.lat || !suggestion.lng) {
       setEtaPreview(null)
       return
@@ -67,51 +74,45 @@ export function ShipmentsPage() {
     const product = products.find((p) => p.id === productId)
     if (!product) return
 
-    let estimate = etaPreview
-    if (!estimate && resolved?.lat && resolved?.lng) {
-      estimate = await estimateRouteWithGoogle({
-        lat: resolved.lat,
-        lng: resolved.lng,
-      })
+    const lat = resolved?.lat
+    const lng = resolved?.lng
+    const finalZip = resolved?.zip || zip
+
+    if (lat == null || lng == null || !finalZip) {
+      setFormError('Select an address with coordinates and ZIP code.')
+      return
     }
 
-    const code = `DLV-${1046 + shipments.length}`
-    addShipment({
-      code,
-      scanCode: code,
-      productId: product.id,
-      productName: product.name,
-      recipient,
-      address: resolved?.description || address,
-      zip: resolved?.zip || '',
-      lat: resolved?.lat,
-      lng: resolved?.lng,
-      status: 'pending',
-      assignedTo: assignedTo || undefined,
-      createdAt: new Date().toISOString().slice(0, 10),
-      distanceMiles: estimate?.distanceMiles,
-      etaMinutes: estimate?.etaMinutes,
-      predictedDeliveryAt: estimate?.predictedDeliveryAt,
-      etaConfidence: estimate?.etaConfidence ?? 'medium',
-    })
-
-    setProductId('')
-    setRecipient('')
-    setAssignedTo('')
-    setAddress('')
-    setResolved(null)
-    setEtaPreview(null)
-    setOpen(false)
+    setFormError(null)
+    setSaving(true)
+    try {
+      await addShipment({
+        productName: product.name,
+        recipient,
+        address: resolved?.description || address,
+        zip: finalZip,
+        lat,
+        lng,
+        driverId: driverId || undefined,
+      })
+      resetModal()
+    } catch (err) {
+      setFormError(err instanceof ApiError ? err.message : 'Failed to create shipment')
+    } finally {
+      setSaving(false)
+    }
   }
 
   function resetModal() {
     setOpen(false)
     setProductId('')
     setRecipient('')
-    setAssignedTo('')
+    setDriverId('')
     setAddress('')
+    setZip('')
     setResolved(null)
     setEtaPreview(null)
+    setFormError(null)
   }
 
   return (
@@ -120,20 +121,30 @@ export function ShipmentsPage() {
         <div>
           <h1>Shipments</h1>
           <p>
-            Create deliveries from catalog products. Drivers must scan QR/barcode
-            + take a pickup photo at the warehouse, then a delivery photo at the
-            address to complete the job.
+            Create deliveries in the API and assign drivers. Scan + POD are
+            completed in the mobile app.
           </p>
         </div>
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={() => setOpen(true)}
-          disabled={products.length === 0}
-        >
-          New shipment
-        </button>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button type="button" className="btn btn-soft" onClick={() => void refreshData()}>
+            Refresh
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => setOpen(true)}
+            disabled={products.length === 0}
+          >
+            New shipment
+          </button>
+        </div>
       </div>
+
+      {(apiError || loading) && (
+        <div className="panel panel-pad" style={{ marginBottom: '1rem' }}>
+          {loading ? 'Loading shipments from API…' : apiError}
+        </div>
+      )}
 
       {products.length === 0 && (
         <div className="panel panel-pad" style={{ marginBottom: '1rem' }}>
@@ -157,63 +168,71 @@ export function ShipmentsPage() {
               </tr>
             </thead>
             <tbody>
-              {shipments.map((shipment) => (
-                <tr key={shipment.id}>
-                  <td>
-                    <button
-                      type="button"
-                      className="linkish"
-                      onClick={() => setSelected(shipment)}
-                    >
-                      {shipment.code}
-                    </button>
-                    <div className="cell-sub">Scan: {shipment.scanCode}</div>
-                  </td>
-                  <td>
-                    {shipment.productName}
-                    {productMap[shipment.productId] && (
-                      <div className="cell-sub">
-                        {formatUsd(productMap[shipment.productId].price)} ·{' '}
-                        {productMap[shipment.productId].weightLb} lb
-                      </div>
-                    )}
-                  </td>
-                  <td>
-                    {shipment.recipient}
-                    <div className="cell-sub">{shipment.address}</div>
-                  </td>
-                  <td>{shipment.assignedTo ?? '—'}</td>
-                  <td>
-                    <div className="photo-pills">
-                      <span
-                        className={`badge ${shipment.pickupPhoto ? 'badge-ok' : 'badge-warn'}`}
-                      >
-                        Pickup {shipment.pickupPhoto ? '✓' : '—'}
-                      </span>
-                      <span
-                        className={`badge ${shipment.deliveryPhoto ? 'badge-ok' : 'badge-warn'}`}
-                      >
-                        Drop-off {shipment.deliveryPhoto ? '✓' : '—'}
-                      </span>
-                    </div>
-                  </td>
-                  <td>
-                    {shipment.etaMinutes != null ? (
-                      <>
-                        ~{shipment.etaMinutes} min
-                        <div className="cell-sub">
-                          {shipment.distanceMiles?.toFixed(1)} mi
-                        </div>
-                      </>
-                    ) : (
-                      '—'
-                    )}
-                  </td>
-                  <td>
-                    <StatusBadge status={shipment.status} />
+              {shipments.length === 0 && !loading ? (
+                <tr>
+                  <td colSpan={7} className="empty">
+                    No shipments yet.
                   </td>
                 </tr>
-              ))}
+              ) : (
+                shipments.map((shipment) => (
+                  <tr key={shipment.id}>
+                    <td>
+                      <button
+                        type="button"
+                        className="linkish"
+                        onClick={() => setSelected(shipment)}
+                      >
+                        {shipment.code}
+                      </button>
+                      <div className="cell-sub">Scan: {shipment.scanCode}</div>
+                    </td>
+                    <td>
+                      {shipment.productName}
+                      {productMap[shipment.productId] && (
+                        <div className="cell-sub">
+                          {formatUsd(productMap[shipment.productId].price)} ·{' '}
+                          {productMap[shipment.productId].weightLb} lb
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      {shipment.recipient}
+                      <div className="cell-sub">{shipment.address}</div>
+                    </td>
+                    <td>{shipment.assignedTo ?? '—'}</td>
+                    <td>
+                      <div className="photo-pills">
+                        <span
+                          className={`badge ${shipment.pickupPhoto ? 'badge-ok' : 'badge-warn'}`}
+                        >
+                          Pickup {shipment.pickupPhoto ? '✓' : '—'}
+                        </span>
+                        <span
+                          className={`badge ${shipment.deliveryPhoto ? 'badge-ok' : 'badge-warn'}`}
+                        >
+                          Drop-off {shipment.deliveryPhoto ? '✓' : '—'}
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      {shipment.etaMinutes != null ? (
+                        <>
+                          ~{shipment.etaMinutes} min
+                          <div className="cell-sub">
+                            {shipment.distanceMiles?.toFixed(1)} mi
+                          </div>
+                        </>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                    <td>
+                      <StatusBadge status={shipment.status} />
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
@@ -229,9 +248,11 @@ export function ShipmentsPage() {
             <div className="modal-body">
               <h2 style={{ fontSize: '1.35rem' }}>Create shipment</h2>
               <p style={{ color: 'var(--muted)' }}>
-                A unique QR/barcode is generated for warehouse pickup. Delivery
-                is only completed after the drop-off photo.
+                Saves the delivery in the backend for the assigned driver app.
               </p>
+              {formError && (
+                <div style={{ color: '#b91c1c', marginBottom: '0.75rem' }}>{formError}</div>
+              )}
               <div className="form-grid two" style={{ marginTop: '0.5rem' }}>
                 <div className="field" style={{ gridColumn: '1 / -1' }}>
                   <label htmlFor="productId">Product</label>
@@ -259,15 +280,15 @@ export function ShipmentsPage() {
                   />
                 </div>
                 <div className="field">
-                  <label htmlFor="assignedTo">Driver</label>
+                  <label htmlFor="driverId">Driver</label>
                   <select
-                    id="assignedTo"
-                    value={assignedTo}
-                    onChange={(e) => setAssignedTo(e.target.value)}
+                    id="driverId"
+                    value={driverId}
+                    onChange={(e) => setDriverId(e.target.value)}
                   >
                     <option value="">Unassigned</option>
                     {drivers.map((c) => (
-                      <option key={c.id} value={c.name}>
+                      <option key={c.id} value={c.id}>
                         {c.name}
                       </option>
                     ))}
@@ -279,6 +300,16 @@ export function ShipmentsPage() {
                     required
                     onChange={setAddress}
                     onSelect={(a) => void handleAddressSelect(a)}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="zip">ZIP code</label>
+                  <input
+                    id="zip"
+                    required
+                    value={zip}
+                    onChange={(e) => setZip(e.target.value)}
+                    placeholder="10003"
                   />
                 </div>
               </div>
@@ -323,8 +354,8 @@ export function ShipmentsPage() {
                 <button type="button" className="btn btn-ghost" onClick={resetModal}>
                   Cancel
                 </button>
-                <button type="submit" className="btn btn-primary">
-                  Create shipment
+                <button type="submit" className="btn btn-primary" disabled={saving}>
+                  {saving ? 'Creating…' : 'Create shipment'}
                 </button>
               </div>
             </div>
@@ -344,8 +375,8 @@ export function ShipmentsPage() {
                 Shipment {selectedLive.code}
               </h2>
               <p style={{ color: 'var(--muted)' }}>
-                Flow: scan QR/barcode at warehouse + pickup photo → drive →
-                delivery photo at address (completes delivery).
+                Flow: driver scans barcode in the mobile app → delivers with POD
+                photo + GPS.
               </p>
 
               <div className="flow-steps">
@@ -353,7 +384,7 @@ export function ShipmentsPage() {
                   className={`flow-step${selectedLive.pickupPhoto ? ' done' : ' current'}`}
                 >
                   <strong>1. Warehouse pickup</strong>
-                  <span>Scan QR/barcode + photo of package leaving depot</span>
+                  <span>Scan QR/barcode in the driver app</span>
                 </div>
                 <div
                   className={`flow-step${
@@ -371,7 +402,7 @@ export function ShipmentsPage() {
                   className={`flow-step${selectedLive.deliveryPhoto ? ' done' : ''}`}
                 >
                   <strong>3. Drop-off photo</strong>
-                  <span>Photo at delivery address computes completion</span>
+                  <span>POD photo + GPS completes the delivery</span>
                 </div>
               </div>
 
@@ -398,27 +429,11 @@ export function ShipmentsPage() {
                   <span>Address</span>
                   <strong>{selectedLive.address}</strong>
                 </div>
-                <div>
-                  <span>ETA</span>
-                  <strong>
-                    {selectedLive.etaMinutes != null
-                      ? `~${selectedLive.etaMinutes} min`
-                      : '—'}
-                  </strong>
-                </div>
-                <div>
-                  <span>Actual duration</span>
-                  <strong>
-                    {selectedLive.actualDurationMinutes != null
-                      ? `${selectedLive.actualDurationMinutes} min`
-                      : '—'}
-                  </strong>
-                </div>
               </div>
 
               <div className="photo-pair">
                 <article className="photo-card">
-                  <h3>Pickup photo (warehouse)</h3>
+                  <h3>Pickup (warehouse scan)</h3>
                   {selectedLive.pickupPhoto ? (
                     <>
                       <img
@@ -432,12 +447,12 @@ export function ShipmentsPage() {
                     </>
                   ) : (
                     <div className="photo-empty">
-                      Waiting for QR/barcode scan + pickup photo
+                      Waiting for driver scan in the mobile app
                     </div>
                   )}
                 </article>
                 <article className="photo-card">
-                  <h3>Delivery photo (address)</h3>
+                  <h3>Delivery photo (POD)</h3>
                   {selectedLive.deliveryPhoto ? (
                     <>
                       <img
@@ -452,33 +467,26 @@ export function ShipmentsPage() {
                     </>
                   ) : (
                     <div className="photo-empty">
-                      Required to mark this shipment as delivered
+                      Waiting for POD photo from the mobile app
                     </div>
                   )}
                 </article>
               </div>
 
               <div className="modal-actions" style={{ justifyContent: 'space-between' }}>
-                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  {!selectedLive.pickupPhoto &&
+                <div>
+                  {selectedLive.status !== 'delivered' &&
                     selectedLive.status !== 'failed' && (
                       <button
                         type="button"
-                        className="btn btn-soft"
-                        onClick={() => simulatePickup(selectedLive.id)}
+                        className="btn btn-ghost"
+                        onClick={() => {
+                          void cancelShipment(selectedLive.id).then(() =>
+                            setSelected(null),
+                          )
+                        }}
                       >
-                        Simulate QR scan + pickup photo
-                      </button>
-                    )}
-                  {selectedLive.pickupPhoto &&
-                    !selectedLive.deliveryPhoto &&
-                    selectedLive.status !== 'failed' && (
-                      <button
-                        type="button"
-                        className="btn btn-accent"
-                        onClick={() => simulateDelivery(selectedLive.id)}
-                      >
-                        Simulate delivery photo (complete)
+                        Cancel delivery
                       </button>
                     )}
                 </div>

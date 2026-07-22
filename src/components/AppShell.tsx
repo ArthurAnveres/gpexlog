@@ -11,7 +11,7 @@ const LINKS = [
   { to: '/app/maps', label: 'Maps' },
   { to: '/app/analytics', label: 'Analytics' },
   { to: '/app/proofs', label: 'Proofs' },
-  { to: '/app/employees', label: 'Employees' },
+  { to: '/app/employees', label: 'Drivers' },
   { to: '/app/billing', label: 'Billing' },
 ]
 
@@ -34,8 +34,7 @@ export function AppShell() {
 
   function signOut() {
     closeMenu()
-    logout()
-    navigate('/login')
+    void logout().then(() => navigate('/login'))
   }
 
   return (
@@ -121,7 +120,7 @@ export function AppShell() {
             </span>
           </div>
           <div className="badge badge-info desktop-only">
-            Web panel · prototype
+            Web panel · API connected
           </div>
           <div className="badge badge-info mobile-only-inline">
             {plan?.name ?? 'Pro'}
